@@ -10,11 +10,15 @@
 app.py
 requirements.txt
 README.md
+survey_result.csv
 sample_data.csv
+assets/americano.svg
 .gitignore
 ```
 
-`sample_data.csv`는 설문 파일이 없어도 Streamlit Cloud에서 바로 실행되도록 넣은 예시 데이터입니다. 앱은 업로드 파일이 없으면 이 파일을 사용하고, 이 파일을 읽지 못하는 경우에도 코드 내부 예시 데이터 생성 함수로 다시 실행됩니다.
+`survey_result.csv`는 실제 설문 결과 파일입니다. 앱은 실행 시 이 파일을 자동으로 읽고 Logistic Regression 모델을 학습합니다.
+
+`sample_data.csv`는 실제 설문 파일이 없거나 읽기 오류가 생겨도 앱이 꺼지지 않도록 넣은 예시 데이터입니다. `sample_data.csv`도 읽지 못하면 코드 내부 예시 데이터 생성 함수로 다시 실행됩니다.
 
 ## 모델 원리
 
@@ -61,7 +65,7 @@ sample_data.csv
 
 날씨 변수는 **불쾌지수 단계**로 사용합니다.
 
-불쾌지수는 기온과 습도를 바탕으로 사람이 느끼는 불쾌감 정도를 나타내는 지표입니다. 다음 네 단계를 사용합니다.
+불쾌지수는 기온과 습도를 바탕으로 사람이 느끼는 불쾌감 정도를 나타내는 지표입니다. 매경헬스 기사 기준을 바탕으로 다음 네 단계를 사용합니다.
 
 | 불쾌지수 구간 | 단계 |
 | --- | --- |
@@ -71,6 +75,8 @@ sample_data.csv
 | 80 이상 | 매우 높음 |
 
 ## 설문 데이터 형식
+
+앱은 프로젝트 폴더의 `survey_result.csv`, `survey_result.xlsx`, `survey_result.xls`를 순서대로 찾습니다. 파일을 찾으면 별도 업로드 없이 해당 데이터로 모델을 학습합니다.
 
 앱은 두 가지 형식의 설문 데이터를 처리할 수 있습니다.
 
@@ -84,7 +90,9 @@ sample_data.csv
 | --- | --- | --- | --- | --- |
 | 홍길동 | test@example.com | 구매하겠다 | 구매하지 않겠다 | 구매하겠다 |
 
-앱은 `상황 1`부터 `상황 20`까지의 열을 찾아 `app.py` 내부의 `SITUATION_CONDITIONS`와 연결합니다. 이후 모델 학습용 long format으로 변환합니다.
+앱은 `| 1 | 월요일 오후 12시 ... 2,800원`처럼 실제 Google Form 문항에 조건이 포함된 열을 자동 인식합니다. 열 이름에서 요일, 시간대, 시험기간 여부, 날씨 단계, 가격을 추출한 뒤 모델 학습용 long format으로 변환합니다.
+
+예시 데이터처럼 `상황 1`, `상황 2` 형식의 열만 있는 경우에는 `app.py` 내부의 `SITUATION_CONDITIONS`와 연결합니다.
 
 개인정보로 보이는 열은 자동 제외합니다.
 
@@ -111,4 +119,48 @@ sample_data.csv
 - 가격
 - 구매여부
 
-`구매여부` 열에는 `구매하겠다`, `구매하지 않겠다`, `1`, `0` 값을 사용할 수 있습니다.
+`구매여부` 열에는 `구매하겠다`, `구매하지 않겠다`, `O`, `X`, `1`, `0` 값을 사용할 수 있습니다.
+
+## 로컬 실행 방법
+
+터미널에서 프로젝트 폴더로 이동한 뒤 실행합니다.
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+실행 후 표시되는 로컬 주소를 브라우저에서 열면 됩니다.
+
+## Streamlit Community Cloud 배포 방법
+
+조원들이 다른 장소에서도 접속하려면 Streamlit Community Cloud에 배포합니다.
+
+1. GitHub에 새 repository를 만듭니다.
+2. 이 프로젝트 파일을 repository에 업로드합니다.
+   - `app.py`
+   - `requirements.txt`
+   - `README.md`
+   - `survey_result.csv`
+   - `sample_data.csv`
+   - `assets/americano.svg`
+   - `.gitignore`
+3. Streamlit Community Cloud에 접속합니다.
+   - https://streamlit.io/cloud
+4. GitHub 계정으로 로그인합니다.
+5. `Create app` 또는 `New app`을 선택합니다.
+6. GitHub repository를 선택합니다.
+7. Main file path를 `app.py`로 지정합니다.
+8. Deploy를 누릅니다.
+9. 생성된 URL을 조원들에게 공유합니다.
+
+배포 후에는 노트북이나 VSCode를 켜두지 않아도 조원들이 웹주소로 접속할 수 있습니다.
+
+## 배포 시 주의사항
+
+- 앱은 상대경로 `sample_data.csv`만 사용합니다.
+- 로컬 컴퓨터의 절대경로는 사용하지 않습니다.
+- 설문 파일 업로드 UI는 사용하지 않습니다.
+- `survey_result.csv`가 있으면 해당 데이터로 Logistic Regression 모델을 자동 학습합니다.
+- 실제 설문 파일이 없거나 오류가 있으면 예시 데이터로 실행됩니다.
+- 데이터 파일에 개인정보성 열이 있어도 모델 학습 전 자동 제외합니다.

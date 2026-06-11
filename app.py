@@ -45,7 +45,13 @@ st.set_page_config(
 
 MENU_NAME = "아메리카노"
 PRICE_CANDIDATES = [1600, 1800, 2000, 2200, 2400, 2600, 2800]
+SURVEY_DATA_CANDIDATES = [
+    Path("survey_result.csv"),
+    Path("survey_result.xlsx"),
+    Path("survey_result.xls"),
+]
 SAMPLE_DATA_PATH = Path("sample_data.csv")
+AMERICANO_IMAGE_PATH = Path("assets") / "americano.svg"
 
 DAYS = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
 TIME_SLOTS = ["8시~11시", "11시~14시", "14시~17시", "17시~19시", "19시 이후"]
@@ -136,6 +142,9 @@ def normalize_purchase_answer(value) -> int | None:
         "예",
         "yes",
         "y",
+        "o",
+        "○",
+        "◯",
         "1",
         "1.0",
         "true",
@@ -150,6 +159,8 @@ def normalize_purchase_answer(value) -> int | None:
         "아니요",
         "no",
         "n",
+        "x",
+        "×",
         "0",
         "0.0",
         "false",
@@ -165,24 +176,114 @@ def normalize_purchase_answer(value) -> int | None:
 def find_situation_column(columns: list[str], situation_number: int) -> str | None:
     """상황 번호에 해당하는 Google Form 질문 열을 찾는다.
 
-    예: '상황 1', '상황1', '상황 1. 11시~14시 아메리카노 1800원' 등
+    예: '상황 1', '상황1', '| 1 | 월요일 오후 12시 ...' 등
     """
-    pattern = re.compile(rf"상황\s*{situation_number}(?!\d)")
+    patterns = [
+        re.compile(rf"상황\s*{situation_number}(?!\d)"),
+        re.compile(rf"^\s*\|\s*{situation_number}\s*\|"),
+    ]
     for column in columns:
-        if pattern.search(str(column)):
+        if any(pattern.search(str(column)) for pattern in patterns):
             return column
     return None
+
+
+def parse_time_slot_from_text(text: str) -> str:
+    """실제 설문 문항의 시간 표현을 모델 시간대 범주로 변환한다."""
+    if any(keyword in text for keyword in ["오전 8", "오전 9", "오전 10", "오전 11"]):
+        return "8시~11시"
+    if any(keyword in text for keyword in ["오후 12", "오후 1"]):
+        return "11시~14시"
+    if any(keyword in text for keyword in ["오후 2", "오후 3", "오후 4"]):
+        return "14시~17시"
+    if any(keyword in text for keyword in ["오후 5", "오후 6"]):
+        return "17시~19시"
+    return "19시 이후"
+
+
+def parse_exam_period_from_text(text: str) -> str:
+    """중간기간/기말기간은 시험기간, 시험기간X는 비시험기간으로 변환한다."""
+    compact_text = text.replace(" ", "")
+    if "시험기간X" in compact_text:
+        return "비시험기간"
+    if "중간" in text or "기말" in text or "시험기간" in text:
+        return "시험기간"
+    return "비시험기간"
+
+
+def parse_di_level_from_text(text: str) -> str:
+    """실제 설문 문항의 날씨 표현을 불쾌지수 단계로 단순 매핑한다.
+
+    실제 설문에는 기온/습도 기반 DI가 아니라 맑음, 흐림, 더움 같은 표현이 있으므로
+    발표용 모델 입력 범주에 맞춰 다음처럼 변환한다.
+    """
+    if "더움" in text:
+        return "매우 높음"
+    if "맑음" in text:
+        return "보통"
+    if any(keyword in text for keyword in ["흐림", "비", "눈", "쌀쌀"]):
+        return "낮음"
+    return "보통"
+
+
+def parse_price_from_text(text: str) -> int | None:
+    """문항에 적힌 첫 번째 가격을 추출한다. 예: 2,800원 -> 2800"""
+    match = re.search(r"(\d{1,3}(?:,\d{3})*)\s*원", text)
+    if match is None:
+        return None
+    return int(match.group(1).replace(",", ""))
+
+
+def parse_situation_from_column(column_name: str) -> dict | None:
+    """'| 1 | 월요일 오후 12시 ... 2,800원' 형식의 실제 설문 열에서 조건을 추출한다."""
+    text = str(column_name)
+    situation_match = re.search(r"^\s*\|\s*(\d+)\s*\|", text)
+    if situation_match is None:
+        return None
+
+    day = next((candidate for candidate in DAYS if candidate in text), None)
+    price = parse_price_from_text(text)
+
+    if day is None or price is None:
+        return None
+
+    return {
+        "상황": int(situation_match.group(1)),
+        "문항열": column_name,
+        "요일": day,
+        "시간대": parse_time_slot_from_text(text),
+        "시험기간 여부": parse_exam_period_from_text(text),
+        "불쾌지수 단계": parse_di_level_from_text(text),
+        "가격": price,
+    }
+
+
+def parse_situation_conditions_from_columns(columns: list[str]) -> pd.DataFrame:
+    """실제 설문 파일의 문항 열에서 상황 조건표를 만든다."""
+    parsed_rows = []
+    for column in columns:
+        parsed = parse_situation_from_column(str(column))
+        if parsed is not None:
+            parsed_rows.append(parsed)
+    return pd.DataFrame(parsed_rows)
 
 
 def convert_wide_survey_to_long(df: pd.DataFrame) -> pd.DataFrame:
     """Google Form식 wide 응답 데이터를 모델 학습용 long 데이터로 변환한다."""
     df = remove_private_columns(df)
     rows = []
+    parsed_situations = parse_situation_conditions_from_columns(list(df.columns))
+    use_parsed_situations = not parsed_situations.empty
+    situations = parsed_situations if use_parsed_situations else SITUATION_CONDITIONS
 
     for respondent_index, response_row in df.iterrows():
-        for _, situation in SITUATION_CONDITIONS.iterrows():
+        for _, situation in situations.iterrows():
             situation_number = int(situation["상황"])
-            situation_column = find_situation_column(list(df.columns), situation_number)
+            situation_column = (
+                situation["문항열"]
+                if use_parsed_situations and "문항열" in situation
+                else find_situation_column(list(df.columns), situation_number)
+            )
 
             if situation_column is None:
                 continue
@@ -238,17 +339,43 @@ def prepare_training_data(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     return pd.DataFrame(), "업로드 데이터에서 상황별 구매 응답을 찾지 못했습니다."
 
 
-def load_uploaded_file(uploaded_file) -> pd.DataFrame:
-    """CSV 또는 Excel 설문 응답 파일을 읽는다."""
-    file_name = uploaded_file.name.lower()
+def read_csv_with_fallback(path: Path) -> pd.DataFrame:
+    """CSV 인코딩이 달라도 읽을 수 있도록 여러 인코딩을 순서대로 시도한다."""
+    last_error = None
+    for encoding in ["utf-8-sig", "utf-8", "cp949", "euc-kr"]:
+        try:
+            return pd.read_csv(path, encoding=encoding)
+        except Exception as error:
+            last_error = error
+    raise ValueError(f"CSV 파일을 읽지 못했습니다: {last_error}")
 
-    if file_name.endswith(".csv"):
-        return pd.read_csv(uploaded_file)
 
-    if file_name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file)
+def load_data_file(path: Path) -> pd.DataFrame:
+    """상대경로 데이터 파일을 확장자에 맞게 읽는다."""
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return read_csv_with_fallback(path)
+    if suffix in [".xlsx", ".xls"]:
+        return pd.read_excel(path)
+    raise ValueError(f"지원하지 않는 데이터 파일 형식입니다: {path.name}")
 
-    raise ValueError("CSV 또는 Excel 파일만 업로드할 수 있습니다.")
+
+def load_default_survey_data() -> tuple[pd.DataFrame, str]:
+    """실제 설문 파일을 우선 사용하고, 없으면 sample_data.csv 또는 생성 예시 데이터를 사용한다."""
+    for path in SURVEY_DATA_CANDIDATES:
+        if path.exists():
+            try:
+                return load_data_file(path), f"실제 설문 파일 {path.name}을 사용했습니다."
+            except Exception as error:
+                st.warning(f"{path.name} 파일을 읽지 못했습니다: {error}")
+
+    if SAMPLE_DATA_PATH.exists():
+        try:
+            return read_csv_with_fallback(SAMPLE_DATA_PATH), "실제 설문 파일이 없어 sample_data.csv를 사용했습니다."
+        except Exception as error:
+            st.warning(f"sample_data.csv를 읽지 못했습니다: {error}")
+
+    return make_example_survey_data(), "데이터 파일이 없어 코드 내부 예시 데이터를 생성했습니다."
 
 
 # ------------------------------------------------------------
@@ -312,19 +439,6 @@ def make_example_survey_data(respondents: int = 60) -> pd.DataFrame:
         rows.append(row)
 
     return pd.DataFrame(rows)
-
-
-def load_sample_or_generated_data() -> tuple[pd.DataFrame, str]:
-    """배포용 sample_data.csv가 있으면 사용하고, 없거나 오류가 나면 예시 데이터를 생성한다."""
-    if SAMPLE_DATA_PATH.exists():
-        try:
-            return pd.read_csv(SAMPLE_DATA_PATH), "sample_data.csv 파일을 사용했습니다."
-        except Exception as error:
-            generated_df = make_example_survey_data()
-            return generated_df, f"sample_data.csv를 읽지 못해 코드 내부 예시 데이터를 생성했습니다: {error}"
-
-    generated_df = make_example_survey_data()
-    return generated_df, "sample_data.csv가 없어 코드 내부 예시 데이터를 생성했습니다."
 
 
 # ------------------------------------------------------------
@@ -414,11 +528,6 @@ def format_won(value: float) -> str:
     return f"{value:,.0f}원"
 
 
-def make_downloadable_example_csv(df: pd.DataFrame) -> bytes:
-    """예시 설문 데이터를 CSV로 내려받을 수 있게 변환한다."""
-    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-
-
 # ------------------------------------------------------------
 # 5. 화면 구성
 # ------------------------------------------------------------
@@ -439,45 +548,34 @@ st.info(
 
 st.divider()
 
-st.subheader("데이터 업로드")
-uploaded_file = st.file_uploader(
-    "설문 응답 Excel 또는 CSV 파일 업로드",
-    type=["csv", "xlsx", "xls"],
-)
+st.subheader("학습 데이터")
 
-example_raw_df, example_data_message = load_sample_or_generated_data()
+raw_df, data_source = load_default_survey_data()
+training_df, data_message = prepare_training_data(raw_df)
 
-with st.expander("예시 설문 데이터와 상황 1~20 조건 보기"):
-    st.write(f"설문 파일을 업로드하지 않으면 아래 예시 데이터로 모델을 학습합니다. ({example_data_message})")
-    st.dataframe(example_raw_df.head(10), width="stretch", hide_index=True)
-    st.download_button(
-        "예시 CSV 다운로드",
-        data=make_downloadable_example_csv(example_raw_df),
-        file_name="coffeenie_example_survey.csv",
-        mime="text/csv",
-    )
-    st.write("상황 1~20 조건")
-    st.dataframe(SITUATION_CONDITIONS, width="stretch", hide_index=True)
+with st.expander("현재 사용 중인 설문 데이터 확인"):
+    st.write(data_source)
+    st.dataframe(raw_df.head(10), width="stretch", hide_index=True)
 
-if uploaded_file is not None:
-    try:
-        raw_df = load_uploaded_file(uploaded_file)
-        training_df, data_message = prepare_training_data(raw_df)
-        data_source = "업로드 데이터"
-    except Exception as error:
-        training_df = pd.DataFrame()
-        data_message = f"업로드 파일 처리 중 오류가 발생했습니다: {error}"
-        data_source = "예시 데이터"
-else:
-    training_df, data_message = prepare_training_data(example_raw_df)
-    data_source = "예시 데이터"
+    parsed_situations = parse_situation_conditions_from_columns(list(raw_df.columns))
+    if not parsed_situations.empty:
+        st.write("실제 설문 문항에서 자동 추출한 상황 조건")
+        st.dataframe(
+            parsed_situations.drop(columns=["문항열"]),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.write("예시 데이터용 상황 1~20 조건")
+        st.dataframe(SITUATION_CONDITIONS, width="stretch", hide_index=True)
 
 if training_df.empty or training_df[TARGET_COLUMN].nunique() < 2:
     st.warning(
-        "업로드 데이터만으로는 모델을 학습하기 어려워 예시 데이터를 사용합니다. "
+        "현재 설문 데이터만으로는 모델을 학습하기 어려워 예시 데이터를 사용합니다. "
         "구매하겠다와 구매하지 않겠다 응답이 모두 포함되어야 합니다."
     )
-    training_df, data_message = prepare_training_data(example_raw_df)
+    fallback_raw_df = make_example_survey_data()
+    training_df, data_message = prepare_training_data(fallback_raw_df)
     data_source = "예시 데이터"
 
 st.caption(f"사용 데이터: {data_source} / {data_message}")
@@ -551,25 +649,28 @@ display_results["추천 여부"] = display_results["추천 여부"].map(lambda v
 
 st.subheader("결과 출력")
 
-metric_col1, metric_col2, metric_col3 = st.columns(3)
+product_col, detail_col = st.columns([0.9, 1.6])
 
-with metric_col1:
+with product_col:
+    if AMERICANO_IMAGE_PATH.exists():
+        st.image(str(AMERICANO_IMAGE_PATH), width=260)
+    else:
+        st.markdown("### 아메리카노")
+
+    st.markdown(f"#### {MENU_NAME} 추천 결과")
     st.metric("추천 가격", format_won(recommended_price))
-
-with metric_col2:
     st.metric("추천 가격 구매확률", f"{recommended_probability * 100:.1f}%")
-
-with metric_col3:
     st.metric("추천 가격 예상매출", format_won(recommended_revenue))
 
-st.success(
-    f"{MENU_NAME} 후보 가격 중 {format_won(recommended_price)}의 예상매출이 가장 높습니다. "
-    "교내 카페 시뮬레이션이므로 수요가 높아도 가격 인상 자체를 목표로 하기보다, "
-    "설문 기반 구매확률과 예상매출을 함께 비교해 수용 가능한 가격을 찾는 전략으로 해석합니다."
-)
+with detail_col:
+    st.success(
+        f"{MENU_NAME} 후보 가격 중 {format_won(recommended_price)}의 예상매출이 가장 높습니다. "
+        "교내 카페 시뮬레이션이므로 수요가 높아도 가격 인상 자체를 목표로 하기보다, "
+        "설문 기반 구매확률과 예상매출을 함께 비교해 수용 가능한 가격을 찾는 전략으로 해석합니다."
+    )
 
-st.write("후보 가격별 구매확률과 예상매출")
-st.dataframe(display_results, width="stretch", hide_index=True)
+    st.write("후보 가격별 구매확률과 예상매출")
+    st.dataframe(display_results, width="stretch", hide_index=True)
 
 st.divider()
 
